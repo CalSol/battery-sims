@@ -38,193 +38,112 @@ fprintf('Module capacity: %.1fAh (9 × 5Ah)\n', 9 * 4.5);
 fprintf('Module energy: %.1fWh (2 × 9 × 18.5Wh)\n', 2 * 9 * 18.5);
 fprintf('Module mass: %.1fkg (18 × 68g)\n', 18 * 0.068);
 
-%% ui stuff
+%% top-down 36s9p cell grid simulation (no modules)
 close all;
 try
-    f = figure('Color','w','Position',[50 50 1800 600]);
-    f.Name = 'thermal analysis';
-    
-    % simulate temperature distribution across pack
-    ambient_temp = 25; % °C
-    num_modules = 18;
-    num_cells_per_module = 9;
-    discharge_rate = 1.0; % 1c
-    current = discharge_rate * 4.5; % 4.5ah capacity
-    power_per_cell = current^2 * 0.012; % 0.012 ir
-    cell_thermal_mass = 120;
-    cell_thermal_resistance = 4.5; % kept for reference, no longer used for cooling
-    % --- radiation parameters (simplified) ---
-    sigma_SB = 5.670374419e-8;  % boltzmann constant (W/m^2/K^4)
-    emissivity = 0.8;           % assumed emissivity
-    A_face = 0.003;             % area between neighboring cells? need to cad this out and verify
+    % Grid size: 36 series by 9 parallel = 36 columns x 9 rows (top-down)
+    nCols = 36; % series strings (x direction)
+    nRows = 9;  % cells in parallel per string (y direction)
 
-    time_sim = 0:60:3600;
-    % store absolute temperatures in Kelvin for radiation calc
-    temp_cells_K = (ambient_temp) * ones(num_cells_per_module, length(time_sim)) + 273.15; % initialize at ambient
+    % Thermal + electrical parameters (per cell)
+    T_amb = 25;                % degC
+    C_cell = 120;              % J/K thermal mass per cell
+    R_internal = 0.012;        % Ohm per cell
 
-    for t = 2:length(time_sim)
-        dt = time_sim(t) - time_sim(t-1);
-        heat_input = power_per_cell * dt;         
-        for c = 1:num_cells_per_module
-            T_prev = temp_cells_K(c, t-1);
-            net_Q_rad_W = 0; % net power (W)
-            if c > 1
-                T_neighbor = temp_cells_K(c-1, t-1);
-                net_Q_rad_W = net_Q_rad_W + emissivity * sigma_SB * A_face * (T_prev^4 - T_neighbor^4);
+    % Neighbor conductive couplings [W/K]
+    Gx = 0.20;  % left/right conductance (between series neighbors)
+    Gy = 0.20;  % up/down conductance (between parallel neighbors)
+
+    % External cooling to ambient (lumped per cell)
+    G_conv = 0.05;   % W/K (tunable convective/radiative loss)
+
+    % Operating profile (per-cell C-rate)
+    C_rate = 1.0;              % per-cell C rate
+    I_cell = C_rate * 4.5;     % A per cell (4.5Ah)
+    P_gen = I_cell^2 * R_internal; % W per cell, constant here
+
+    % Time discretization
+    t_grid = 0:10:3600;  % seconds, 10 s step for stability
+    dt = t_grid(2) - t_grid(1);
+
+    % State initialization (degC)
+    T = T_amb * ones(nRows, nCols);
+
+    % Diagnostics over time
+    T_min = zeros(size(t_grid));
+    T_max = zeros(size(t_grid));
+    T_avg = zeros(size(t_grid));
+    T_min(1) = min(T, [], 'all');
+    T_max(1) = max(T, [], 'all');
+    T_avg(1) = mean(T, 'all');
+
+    % Explicit time stepping of 2D network: each cell exchanges with 4 neighbors + ambient loss
+    for k = 2:numel(t_grid)
+        Tprev = T;
+        % Loop over grid (compact, readable; could be vectorized if needed)
+        for r = 1:nRows
+            for c = 1:nCols
+                Tc = Tprev(r,c);
+                % neighbors (use ambient when out of bounds)
+                T_left  = (c > 1)     * Tprev(r, max(c-1,1))   + (c == 1)    * T_amb;
+                T_right = (c < nCols) * Tprev(r, min(c+1,nCols)) + (c == nCols)* T_amb;
+                T_up    = (r > 1)     * Tprev(max(r-1,1), c)   + (r == 1)    * T_amb;
+                T_down  = (r < nRows) * Tprev(min(r+1,nRows), c) + (r == nRows)* T_amb;
+
+                % Net conductive power into cell from neighbors
+                P_cond = Gx*(T_left - Tc) + Gx*(T_right - Tc) + Gy*(T_up - Tc) + Gy*(T_down - Tc);
+                % Lumped convection/radiation to ambient
+                P_amb = G_conv*(T_amb - Tc);
+                % Energy balance
+                dT = (P_gen + P_cond + P_amb) * dt / C_cell;
+                T(r,c) = Tc + dT;
             end
-            if c < num_cells_per_module
-                T_neighbor = temp_cells_K(c+1, t-1);
-                net_Q_rad_W = net_Q_rad_W + emissivity * sigma_SB * A_face * (T_prev^4 - T_neighbor^4);
-            end
-            % energy balance (thank you radke)
-            dT = (heat_input - net_Q_rad_W * dt) / cell_thermal_mass;
-            temp_cells_K(c, t) = T_prev + dT;
         end
+        T_min(k) = min(T, [], 'all');
+        T_max(k) = max(T, [], 'all');
+        T_avg(k) = mean(T, 'all');
     end
-    % convert back to Celsius for plotting
-    cell_temperatures = temp_cells_K - 273.15;
-    % max cell temp in module taken to represent (have to fix this later)
 
-    % Module temperature placeholders (will be updated after full thermal simulation later)
-    module_temps = ambient_temp * ones(1, num_modules); % start at ambient
-    temp_distribution = module_temps; % alias
-    % We will update these rectangles after computing lumped thermal profiles (see later section).
-    
-    
+    % Visualization: top-down heat map and simple diagnostics
+    f = figure('Color','w','Position',[50 50 1700 600]);
+    f.Name = '36s9p top-down thermal simulation';
+
+    % 1) Pack summary traces
     subplot(1,3,1);
-    
-    hold on;
-    
-    % Draw 18 modules in a single horizontal line
-    cmap = jet(256); % color map
-    tmin = min(temp_distribution);
-    tmax = max(temp_distribution);
-    rectHandles = gobjects(1, num_modules);
-    tempTextHandles = gobjects(1, num_modules);
-    for module = 1:num_modules
-        x_pos = module * 2;
-        y_pos = 5;
-        % Map temperature to color (handle uniform case to avoid divide-by-zero)
-        if tmax == tmin
-            temp_normalized = 128; % mid-point color when all temps identical
-        else
-            temp_normalized = round(1 + (temp_distribution(module) - tmin) / (tmax - tmin) * 255);
-            temp_normalized = min(max(temp_normalized,1),256); % Clamp to [1,256]
-        end
-        module_color = cmap(temp_normalized, :);
-        % modules to see temperature gradient
-        rectHandles(module) = rectangle('Position', [x_pos-0.8, y_pos-1.5, 1.6, 3], ...
-                 'FaceColor', module_color, 'EdgeColor', 'black', 'LineWidth', 1.5);
-        % label
-        text(x_pos, y_pos, sprintf('M%d', module), ...
-            'HorizontalAlignment', 'center', 'FontSize', 8, 'FontWeight', 'bold');
-        % label temp
-        tempTextHandles(module) = text(x_pos, y_pos-2.5, sprintf('%.1f°C', temp_distribution(module)), ...
-            'HorizontalAlignment', 'center', 'FontSize', 7, 'Color', 'red');
-    end
-    
-    title('Pack Configuration: 18 Modules — Awaiting Simulation Update', 'FontSize', 14, 'FontWeight', 'bold');
-    xlabel('Module Position Along Pack Length');
-    ylabel('Pack Width');
-    xlim([0, 38]); ylim([0, 8]);
-    axis equal;
+    plot(t_grid/60, T_avg, 'k', 'LineWidth', 2); hold on;
+    plot(t_grid/60, T_min, '--', 'Color',[0.2 0.6 1.0], 'LineWidth', 1.5);
+    plot(t_grid/60, T_max, '--', 'Color',[1.0 0.2 0.2], 'LineWidth', 1.5);
+    yline(T_amb, ':', 'Ambient', 'Color',[0.3 0.3 0.3]);
     grid on;
-    
+    xlabel('Time (min)'); ylabel('Temperature (°C)');
+    title(sprintf('36s9p pack: %.1fC per cell, R=%.3fΩ', C_rate, R_internal));
+    legend('Average','Min','Max','Location','northwest');
+
+    % 2) Final top-down heat map (rows=parallel, cols=series)
     subplot(1,3,2);
-    % single cell model -- making things much more advanced
-    hold on;
-    
-    % single cell thermal visualization
-    [theta, r] = meshgrid(linspace(0, 2*pi, 20), linspace(0, 1, 10));
-    [x_cell, y_cell] = pol2cart(theta, r);
-    
-    % radial temperature distribution INSIDE cell
-    temp_radial = ambient_temp + 15 * (1 - r.^2); 
-    
-    % plot distribution based on what math was above this line
+    imagesc(T); axis image; colormap(hot); colorbar; caxis([min(T_amb, min(T,[],"all")) max(T,[],"all")]);
+    title(sprintf('Top-down temperature (final @ %.0f min)', t_grid(end)/60));
+    xlabel('Series position (1→36)'); ylabel('Parallel position (1→9)');
 
-    surf(x_cell, y_cell, zeros(size(x_cell)), temp_radial, 'EdgeColor', 'none');
-    % thermal zones
-    contour(x_cell, y_cell, temp_radial, [30, 35, 40], 'LineColor', 'black', 'LineWidth', 2);
-    title('Single Cell Thermal Strategy', 'FontSize', 14, 'FontWeight', 'bold');
-    xlabel('Cell Radial Position');
-    ylabel('Cell Radial Position');
-    view(0, 90); % look at it
-    axis equal;
-    cb = colorbar;
-    ylabel(cb, 'Temperature (°C)');
-    
-    % annotations that ai made
-    text(0, -1.5, 'Core: 40°C', 'HorizontalAlignment', 'center', 'FontSize', 10, 'FontWeight', 'bold', 'Color', 'red');
-    text(0.7, 0.7, 'Edge: 30°C', 'HorizontalAlignment', 'center', 'FontSize', 10, 'FontWeight', 'bold', 'Color', 'blue');
-    text(0, 1.5, '21700 Li-ion Cell\nRadial Heat Distribution', 'HorizontalAlignment', 'center', 'FontSize', 9);
-    
+    % 3) Column-wise (series string) average temperature bar plot
     subplot(1,3,3);
-    % PANEL 3: pack heatmap based on cell temps from above
-    hold on;
-    
-    % temp zones based on module temps
-    temp_zones = zeros(1, num_modules);
-    for i = 1:num_modules
-        if temp_distribution(i) <= 30
-            temp_zones(i) = 1; % Cool - Blue
-        elseif temp_distribution(i) <= 35
-            temp_zones(i) = 2; % Medium - Yellow
-        else
-            temp_zones(i) = 3; % Hot - Red
-        end
-    end
-    
-    % colors that ARE BETWEEN [0, 1]
-    zone_colors = [0.2 0.6 1.0;   % blue
-                   1.0 0.9 0.2;   % yellow
-                   1.0 0.2 0.2];  % red
-    
-    % heatmap
-    for module = 1:18
-        x_pos = module * 2;
-        y_pos = 5;
-        
-        color_idx = temp_zones(module);
-        
-        
-        rectangle('Position', [x_pos-0.8, y_pos-1.5, 1.6, 3], ...
-                 'FaceColor', zone_colors(color_idx, :), 'EdgeColor', 'black', 'LineWidth', 2);
-        
-        text(x_pos, y_pos, sprintf('M%d', module), ...
-            'HorizontalAlignment', 'center', 'FontSize', 8, 'FontWeight', 'bold');
-        
-        zone_labels = {'COOL', 'MED', 'HOT'};
-        text(x_pos, y_pos-2.5, sprintf('%s\n%.1f°C', zone_labels{color_idx}, temp_distribution(module)), ...
-            'HorizontalAlignment', 'center', 'FontSize', 7, 'FontWeight', 'bold');
-    end
-    
-    title('Pack Thermal Heatmap: 3-Zone Strategy', 'FontSize', 14, 'FontWeight', 'bold');
-    xlabel('Module Position Along Pack Length');
-    ylabel('Pack Width');
-    xlim([0, 38]); ylim([0, 8]);
-    axis equal;
-    grid on;
-    
+    colAvg = mean(T,1);
+    bar(1:nCols, colAvg, 0.9, 'FaceColor', [0.2 0.6 1.0]); grid on;
+    xlabel('Series string'); ylabel('Avg Temp (°C)');
+    title('Series string average temperatures');
 
-    legend_x = 32;
-    legend_y = 7;
-    
-    % Cool zone
-    rectangle('Position', [legend_x, legend_y, 1, 0.5], 'FaceColor', zone_colors(1,:), 'EdgeColor', 'black');
-    text(legend_x + 1.2, legend_y + 0.25, 'COOL (≤30°C)', 'FontSize', 9, 'VerticalAlignment', 'middle');
-    
-    % Medium zone  
-    rectangle('Position', [legend_x, legend_y-0.8, 1, 0.5], 'FaceColor', zone_colors(2,:), 'EdgeColor', 'black');
-    text(legend_x + 1.2, legend_y - 0.55, 'MEDIUM (31-35°C)', 'FontSize', 9, 'VerticalAlignment', 'middle');
-    
-    % Hot zone
-    rectangle('Position', [legend_x, legend_y-1.6, 1, 0.5], 'FaceColor', zone_colors(3,:), 'EdgeColor', 'black');
-    text(legend_x + 1.2, legend_y - 1.35, 'HOT (>35°C)', 'FontSize', 9, 'VerticalAlignment', 'middle');
-    
+    % Package results for saving/analysis
+    topdown = struct();
+    topdown.params = struct('nRows', nRows, 'nCols', nCols, 'T_amb', T_amb, ...
+                            'C_cell', C_cell, 'R_internal', R_internal, ...
+                            'Gx', Gx, 'Gy', Gy, 'G_conv', G_conv, ...
+                            'C_rate', C_rate, 'I_cell', I_cell, 'P_gen', P_gen);
+    topdown.t = t_grid;
+    topdown.T_final = T;
+    topdown.T_min = T_min; topdown.T_max = T_max; topdown.T_avg = T_avg;
 
 catch ME
-    fprintf('you messed up something in the ui bro\n');
+    warning(ME.identifier, 'Top-down simulation failed: %s', ME.message);
 end
 
 %% simscape model to see circuit behavior
@@ -352,95 +271,20 @@ for i = 1:length(discharge_rates)
     
     max_temp_reached = max(temperature);
     if max_temp_reached > thermal_params.max_temp
-        print('too hot')
+        disp('too hot');
     end
 end
 
-% --- Per-module conduction model & heatmap update (1C case) ---
+% (Module-based conduction visualization removed to focus on cell-level top-down model)
+
+% Save results (include top-down if available)
 try
-    target_C = 1.0;          % choose C-rate to visualize spatial distribution
-    I1 = target_C * 4.5;     % A
-    P_cell = I1^2 * thermal_params.internal_resistance; % W per cell
-    cells_per_module = num_cells_per_module; % using earlier definition (9)
-    P_module = cells_per_module * P_cell;    % uniform generation per module
-    C_module = cells_per_module * thermal_params.cell_thermal_mass; % J/K per module
-
-    % Conduction only (no external cooling): set inter-module conductance, remove ambient losses.
-    G_cond = 0.18;   % W/K between adjacent modules (effective lumped conductance)
-
-    t_vec = time_sim; % reuse 0:60:3600
-    moduleTemps = thermal_params.ambient_temp * ones(length(t_vec), num_modules);
-    % 1D conduction with fixed ambient boundary (ghost nodes at ambient).
-    % This produces a spatial gradient: edges lose heat to ambient, center runs hotter.
-    for ti = 2:length(t_vec)
-        dt = t_vec(ti) - t_vec(ti-1);
-        Tprev = moduleTemps(ti-1, :);
-        Tnew = Tprev;
-        for m = 1:num_modules
-            Tm = Tprev(m);
-            T_left  = thermal_params.ambient_temp; if m > 1, T_left  = Tprev(m-1); end
-            T_right = thermal_params.ambient_temp; if m < num_modules, T_right = Tprev(m+1); end
-            % Net conductive power INTO module m from neighbors & ambient-boundary nodes
-            P_cond = G_cond * ((T_left - Tm) + (T_right - Tm)); % W
-            net_power = P_module + P_cond; % generation plus conductive in-flow (can be negative)
-            dT = (net_power * dt) / C_module;
-            Tnew(m) = Tm + dT;
-        end
-        moduleTemps(ti,:) = Tnew;
+    if exist('topdown','var')
+        save('thermal_simulation_results.mat', 'thermal_params', 'discharge_rates', 'time_sim', 'topdown');
+    else
+        save('thermal_simulation_results.mat', 'thermal_params', 'discharge_rates', 'time_sim');
     end
-
-    finalTemps = moduleTemps(end, :);
-    tmin = min(finalTemps); tmax = max(finalTemps);
-    cmap = jet(256);
-    for m = 1:num_modules
-        if tmax == tmin
-            ci = 128;
-        else
-            ci = round(1 + (finalTemps(m) - tmin)/(tmax - tmin)*255);
-            ci = min(max(ci,1),256);
-        end
-        set(rectHandles(m), 'FaceColor', cmap(ci,:));
-        set(tempTextHandles(m), 'String', sprintf('%.1f°C', finalTemps(m)));
-    end
-    subplot(1,3,1);
-    title(sprintf('Per-Module Conduction (Edges Fixed at Ambient)  Min %.1f°C  Max %.1f°C', tmin, tmax), 'FontSize', 14, 'FontWeight', 'bold');
-    drawnow;
-
-    % --- Redraw zone heatmap (subplot 3) with new distribution ---
-    subplot(1,3,3); cla; hold on;
-    updatedTemps = finalTemps;
-    temp_zones = zeros(1, num_modules);
-    for iZ = 1:num_modules
-        if updatedTemps(iZ) <= 30
-            temp_zones(iZ) = 1;
-        elseif updatedTemps(iZ) <= 35
-            temp_zones(iZ) = 2;
-        else
-            temp_zones(iZ) = 3;
-        end
-    end
-    zone_colors = [0.2 0.6 1.0; 1.0 0.9 0.2; 1.0 0.2 0.2];
-    for module = 1:num_modules
-        x_pos = module * 2; y_pos = 5; color_idx = temp_zones(module);
-        rectangle('Position', [x_pos-0.8, y_pos-1.5, 1.6, 3], 'FaceColor', zone_colors(color_idx,:), 'EdgeColor', 'black', 'LineWidth', 2);
-        text(x_pos, y_pos, sprintf('M%d', module), 'HorizontalAlignment', 'center', 'FontSize', 8, 'FontWeight', 'bold');
-        zone_labels = {'COOL','MED','HOT'};
-        text(x_pos, y_pos-2.5, sprintf('%s\n%.1f°C', zone_labels{color_idx}, updatedTemps(module)), 'HorizontalAlignment', 'center', 'FontSize', 7, 'FontWeight', 'bold');
-    end
-    title(sprintf('Pack Thermal Zones (1C, Edge Ambient BC)  Max %.1f°C', max(updatedTemps)), 'FontSize', 14, 'FontWeight', 'bold');
-    xlabel('Module Position Along Pack Length'); ylabel('Pack Width'); xlim([0, 38]); ylim([0,8]); axis equal; grid on;
-
-    % Legend
-    legend_x = 32; legend_y = 7;
-    rectangle('Position', [legend_x, legend_y, 1, 0.5], 'FaceColor', zone_colors(1,:), 'EdgeColor', 'black');
-    text(legend_x + 1.2, legend_y + 0.25, 'COOL (≤30°C)', 'FontSize', 9, 'VerticalAlignment', 'middle');
-    rectangle('Position', [legend_x, legend_y-0.8, 1, 0.5], 'FaceColor', zone_colors(2,:), 'EdgeColor', 'black');
-    text(legend_x + 1.2, legend_y - 0.55, 'MED (31–35°C)', 'FontSize', 9, 'VerticalAlignment', 'middle');
-    rectangle('Position', [legend_x, legend_y-1.6, 1, 0.5], 'FaceColor', zone_colors(3,:), 'EdgeColor', 'black');
-    text(legend_x + 1.2, legend_y - 1.35, 'HOT (>35°C)', 'FontSize', 9, 'VerticalAlignment', 'middle');
+    fprintf('Results saved to: thermal_simulation_results.mat\n');
 catch ME
-    warning(ME.identifier, '%s', ME.message);
+    warning(ME.identifier, 'Could not save results: %s', ME.message);
 end
-
-save('thermal_simulation_results.mat', 'thermal_params', 'discharge_rates', 'time_sim');
-fprintf('Results saved to: thermal_simulation_results.mat\n');
