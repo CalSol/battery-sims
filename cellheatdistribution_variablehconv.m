@@ -4,7 +4,7 @@ r=D/2;
 h=0.070155;
 m=0.07;
 V=pi*r^2*h;
-SA=2*pi*(r^2)+2*pi*(r^2)*h;
+SA=2*pi*(r^2)+2*pi*(2*r)*h;
 rho = m/V;   % density, kg/m^3
 % specs
 V_nominal=3.6;
