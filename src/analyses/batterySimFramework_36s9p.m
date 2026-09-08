@@ -19,7 +19,6 @@
 %    (7) Clean, presentable visualizations (saved to PNG)
 %
 %  Requires: MATLAB, Simulink, Simscape, Simscape Battery, PDE Toolbox
-%  Author: generated for Amperedata battery framework audit/rebuild
 %  ========================================================================
 
 function batterySimFramework_36s9p()
@@ -360,10 +359,9 @@ L=sparse(I,J,Sv,N,N);
 end
 
 function P = singleCellPDE(c, I_rms, Tamb_C)
-% Corrected transient PDE thermal model of one cylindrical cell.
-% FIXES vs original script:
-%   * MassDensity = rho (NOT the heat-generation q)   <-- key bug fix
-%   * anisotropic conductivity [k_r;k_r;k_z]
+% Transient PDE thermal model of one cylindrical cell.  The material density
+% is rho; heat generation q is applied separately.  Conductivity is
+% anisotropic: [k_r; k_r; k_z].
 P.ok=false;
 Tamb=Tamb_C+273.15;
 q = (I_rms^2)*c.R0_ref / c.V;              % W/m^3 volumetric heat gen

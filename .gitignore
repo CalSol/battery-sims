@@ -7,3 +7,5 @@ sim_outputs/framework_results.mat
 +packThermal_18cell/ParallelAssembly1.ssc
 +singleGroup_9p/parallelAssembly.svg
 +singleGroup_9p/ParallelAssembly1.ssc
+slprj/
+*.slxc
